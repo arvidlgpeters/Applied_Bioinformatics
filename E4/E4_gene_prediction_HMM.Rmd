@@ -1,1 +1,193 @@
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+# Making sure all packages that we need is installed
+pkg_list <- c("HMM", "Biostrings", "purrr")
+
+for (pkg in pkg_list) {
+  if (!requireNamespace(pkg, quietly = TRUE)) {
+    if (pkg == "Biostrings") {
+      if (!requireNamespace("BiocManager", quietly = TRUE)) {
+        install.packages("BiocManager")
+      }
+      BiocManager::install("Biostrings")
+    } else {
+      install.packages(pkg)
+    }
+  }
+}
+
+# Import the packages.
+suppressPackageStartupMessages({
+  library(HMM)
+  library(Biostrings)
+  library(tidyverse)
+  library(purrr)
+})
+
+# Defining some helper functions
+# You will use these functions when you set up your own experiments.
+
+preparing_observations <- function(set, indices){
+  # prepare data by concatenating all the DNAstrings in set specified by indices 
+  obs_list <- purrr::map(as.list(set[indices]), function(dna) {
+    strsplit(as.character(dna), split = "")[[1]]
+  })
+  return(obs_list)
+}
+
+convert_list_to_string <- function(list) {
+  # I'm just a helper function that converts lists of individual letters into DNA strings 
+  #. Please ignore me.
+  paste(list, collapse = "")
+}
+
+convert_string_to_list <- function(string) {
+  # I'm just a helper function that converts DNA strings into lists of individual
+  # letters so the HMM functions don't complain. Please ignore me.
+  strsplit(string, split = "")[[1]]
+}
+
+get_gene_start_and_stop_from_annotation <- function(annotation_list, pattern){
+  # Function that returns indices of all matches to the pattern
+  annotation_string <- convert_list_to_string(annotation_list)
+  locs <- stringr::str_locate_all(annotation_string, stringr::regex(pattern))
+  return(locs)
+}
+
+convert_to_protein <- function(start, stop, string = "") {
+  # convert a DNAstring to a AAsequence between the start and stop indices
+  Biostrings::translate(string[start:stop])
+}
+
+convert_to_proteins <- function(indices, string){
+  # Function that converts the DNA string in to proteins where the indices indicate the coding regions are.
+  dna_str <- Biostrings::DNAString(convert_list_to_string(string))
+  idx_vec <- unlist(indices)
+  n <- length(idx_vec) / 2
+  starts <- idx_vec[seq_len(n)]
+  stops  <- idx_vec[seq_len(n) + n]
+  AAStringSet(purrr::map2_chr(starts, stops, convert_to_protein, string = dna_str))
+}
+
+
+# initiates simple HMM model
+gene_annot_model <- initHMM(
+  States      = c("C", "N"),
+  Symbols     = c("A", "T", "C", "G"),       # Symbols: set of outputs Y  (the order here determines the order of values below!)
+  startProbs  = c(0.3, 0.7),                 # startProbs: initial transition probabilities $\pi$ into each state
+  transProbs  = rbind(c(0.995, 0.005),       # transProbs: the matrix A: each row c(...) holds the outgoing transition probabs for a given state (order),
+                      c(0.01,  0.99)),    #             rbind() = "row bind": creates a matrix, which is the strucure this functions expects
+  emissionProbs = t(rbind(
+    c(0.3, 0.1),                             # emissionProbs: the matrix B: each column represents the $b_state(symbol)$ for a given state.
+    c(0.3, 0.1),                             #                t() is matrix transpose (because the function wants $b_state(symbol)$ to be rows
+    c(0.2, 0.4),                             #                but the notes use columns...)
+    c(0.2, 0.4)
+  ))
+)
+
+print(gene_annot_model)  # Nice description of the model to inspect what we did.
+
+
+setwd("~/Applied_Bioinformatics/E4")
+
+# load reference genome
+reference_genome_set <- readDNAStringSet("S288C_reference_sequence_R64-3-1_20210421.fsa")
+
+# preparing training set using chromosome 1-2  
+training_observations <- preparing_observations(reference_genome_set, 1:2)
+
+# preparing test set using chromosomes 3-4
+test_observations <- preparing_observations(reference_genome_set, 3:4)
+
+system.time(
+  trained_model <- viterbiTraining(
+    gene_annot_model,
+    training_observations,
+    maxIterations = 10
+  )[[1]]
+)
+
+PATTERN <- "C+" # Simple pattern getting the 
+annotation_initial_model  <- viterbi(gene_annot_model,  test_observations)
+annotation_trained_model  <- viterbi(trained_model,     test_observations)
+
+annotation_indices_initial_model <- get_gene_start_and_stop_from_annotation(
+  annotation_initial_model, PATTERN
+)
+annotation_indices_trained_model <- get_gene_start_and_stop_from_annotation(
+  annotation_trained_model, PATTERN
+)
+
+proteins_initial_model <- convert_to_proteins(annotation_indices_initial_model, test_observations)
+proteins_trained_model <- convert_to_proteins(annotation_indices_trained_model, test_observations)
+
+width_augustus       <- width(readAAStringSet("data/ref_annot_augustus.fasta"))
+width_initial_model  <- width(proteins_initial_model)
+width_trained_model  <- width(proteins_trained_model)
+
+hist(width_augustus)
+hist(width_initial_model)
+hist(width_trained_model)
+
+# initiates simple HMM model
+max_model <- initHMM(
+  States      = c("C", "N"),
+  Symbols     = c("A", "T", "C", "G"),        # Symbols: set of outputs Y  (the order here determines the order of values below!)
+  startProbs  = c(0.7, 0.3),                  # startProbs: initial transition probabilities $\pi$ into each state
+  transProbs  = rbind(
+    c(0.85, 0.05),                            # transProbs: the matrix A: each row c(...) holds the outgoing transition probabs for a given state (order),
+    c(0.05, 0.85)                             #             rbind() = "row bind": creates a matrix, which is the strucure this functions expects
+  ),
+  emissionProbs = t(rbind(
+    c(0.2467, 0.3076),                        # emissionProbs: the matrix B: each column represents the $b_state(symbol)$ for a given state.
+    c(0.2222, 0.3076),                        #                t() is matrix transpose (because the function wants $b_state(symbol)$ to be rows
+    c(0.2577, 0.1924),                        #                but the notes use columns...)
+    c(0.2734, 0.1924)
+  ))
+)
+
+print(max_model)  
+
+
+setwd("~/Applied_Bioinformatics/E4")
+
+# load reference genome
+reference_genome_set <- readDNAStringSet("S288C_reference_sequence_R64-3-1_20210421.fsa")
+
+# preparing training set, chromosome 6-7  
+training_observations <- preparing_observations(reference_genome_set, 6:7)
+
+# preparing test set, chromosomes 8-9
+test_observations <- preparing_observations(reference_genome_set, 8:9)
+
+system.time(
+  trained_max_model <- viterbiTraining(
+    max_model,
+    training_observations,
+    maxIterations = 10
+  )[[1]]
+)
+
+PATTERN <- "C+" # Simple pattern getting the 
+annotation_initial_max_model  <- viterbi(max_model,         test_observations)
+annotation_trained_max_model  <- viterbi(trained_max_model, test_observations)
+
+annotation_indices_initial_max_model <- get_gene_start_and_stop_from_annotation(
+  annotation_initial_max_model, PATTERN
+)
+annotation_indices_trained_max_model <- get_gene_start_and_stop_from_annotation(
+  annotation_trained_max_model, PATTERN
+)
+
+proteins_initial_max_model <- convert_to_proteins(annotation_indices_initial_max_model, test_observations)
+proteins_trained_max_model <- convert_to_proteins(annotation_indices_trained_max_model, test_observations)
+
+width_augustus          <- width(readAAStringSet("data/ref_annot_augustus.fasta"))
+width_initial_max_model <- width(proteins_initial_max_model)
+width_trained_max_model <- width(proteins_trained_max_model)
+
+hist(width_augustus)
+hist(width_initial_max_model)
+hist(width_trained_max_model)
+
 
