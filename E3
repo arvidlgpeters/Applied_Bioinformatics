@@ -1,1 +1,171 @@
+```{r}
+#install.packages("combinat")
+
+# ---------------------------------------------------------------------------
+# Task 1: global alignment (Needleman-Wunsch), distance version
+# ---------------------------------------------------------------------------
+
+PURINES     <- c("A", "G")
+PYRIMIDINES <- c("C", "T")
+
+COST_GAP          <- 8
+COST_TRANSITION   <- 2   # A<->G or C<->T
+COST_TRANSVERSION <- 4   # purine <-> pyrimidine
+
+dist_global <- function(a, b) {
+  # `%in%` tests membership, so a whole "same chemical class" check
+  # is two short lines instead of four chained comparisons.
+  if (a == b) return(0)
+  if (a == "-" || b == "-") return(COST_GAP)
+  
+  same_class <- (a %in% PURINES     && b %in% PURINES) ||
+    (a %in% PYRIMIDINES && b %in% PYRIMIDINES)
+  
+  if (same_class) COST_TRANSITION else COST_TRANSVERSION
+}
+
+global_alignment_matrix <- function(seq1, seq2) {
+  s1 <- strsplit(seq1, "")[[1]]
+  s2 <- strsplit(seq2, "")[[1]]
+  n <- length(s1)
+  m <- length(s2)
+  
+  D <- matrix(0, nrow = n + 1, ncol = m + 1)
+  
+  # Boundaries in one vectorised step each: 0, gap, 2*gap, ...
+  # (also works for empty sequences, unlike seq(2, n + 1))
+  D[, 1] <- COST_GAP * (0:n)
+  D[1, ] <- COST_GAP * (0:m)
+  
+  # seq_len(n) is safe when n == 0 (gives an empty loop, not c(1, 0)).
+  for (i in seq_len(n)) {
+    for (j in seq_len(m)) {
+      D[i + 1, j + 1] <- min(
+        D[i,     j    ] + dist_global(s1[i], s2[j]),  # diagonal
+        D[i,     j + 1] + dist_global(s1[i], "-"),    # from above
+        D[i + 1, j    ] + dist_global("-",   s2[j])   # from left
+      )
+    }
+  }
+  D
+}
+
+global_alignment_value <- function(D) D[nrow(D), ncol(D)]
+
+# ---------------------------------------------------------------------------
+# Task 2: local alignment (Smith-Waterman), score version
+# ---------------------------------------------------------------------------
+
+SCORE_MATCH    <-  2
+SCORE_GAP      <- -6
+SCORE_MISMATCH <- -4
+
+dist_local <- function(a, b) {
+  if (a == b) return(SCORE_MATCH)
+  if (a == "-" || b == "-") return(SCORE_GAP)
+  SCORE_MISMATCH
+}
+
+local_alignment_matrix <- function(seq1, seq2) {
+  s1 <- strsplit(seq1, "")[[1]]
+  s2 <- strsplit(seq2, "")[[1]]
+  
+  D <- matrix(0, nrow = length(s1) + 1, ncol = length(s2) + 1)
+  
+  for (i in seq_along(s1)) {
+    for (j in seq_along(s2)) {
+      # max() over the three moves plus 0: a local alignment may
+      # restart anywhere, so scores never go negative.
+      D[i + 1, j + 1] <- max(
+        0,
+        D[i,     j    ] + dist_local(s1[i], s2[j]),
+        D[i,     j + 1] + dist_local(s1[i], "-"),
+        D[i + 1, j    ] + dist_local("-",   s2[j])
+      )
+    }
+  }
+  D
+}
+
+local_alignment_value <- function(D) max(D)
+
+# ---------------------------------------------------------------------------
+# Task 3: shortest common superstring (brute force over permutations)
+# ---------------------------------------------------------------------------
+
+len_overlap <- function(seq1, seq2) {
+  # Try the longest possible overlap first and shrink it; the first hit
+  # is therefore the longest. Returns 0 if nothing overlaps.
+  longest_possible <- min(nchar(seq1), nchar(seq2))
+  for (k in rev(seq_len(longest_possible))) {
+    # last k characters of seq1 vs first k characters of seq2
+    if (substring(seq1, nchar(seq1) - k + 1) == substr(seq2, 1, k)) {
+      return(k)
+    }
+  }
+  0
+}
+
+merge_strings <- function(left, right) {
+  # Append only the part of `right` that does not already overlap `left`.
+  paste0(left, substring(right, len_overlap(left, right) + 1))
+}
+
+greedy_shortest_common_superstring <- function(strings) {
+  if (length(strings) == 1) return(strings)
+  
+  permutations <- combinat::permn(strings)
+  
+  # Reduce() folds merge_strings left to right over one permutation:
+  # merge(merge(merge(p1, p2), p3), p4) ...
+  candidates <- vapply(permutations, function(p) Reduce(merge_strings, p),
+                       character(1))
+  
+  # which.min returns the FIRST shortest candidate, matching the
+  # "strictly shorter replaces" rule of the skeleton version.
+  candidates[which.min(nchar(candidates))]
+}
+
+# ---------------------------------------------------------------------------
+# Tests (same cases as the notebook; test 2 of task 3 has its bracket fixed)
+# ---------------------------------------------------------------------------
+
+stopifnot(dist_global("A", "G") == 2, dist_global("A", "-") == 8,
+          dist_global("C", "T") == 2, dist_global("A", "C") == 4)
+
+seq1 <- "TACGTCAGC"; seq2 <- "TATGTCATGC"
+expected_global <- t(matrix(c(
+  c( 0,  8, 16, 24, 32, 40, 48, 56, 64, 72, 80),
+  c( 8,  0,  8, 16, 24, 32, 40, 48, 56, 64, 72),
+  c(16,  8,  0,  8, 16, 24, 32, 40, 48, 56, 64),
+  c(24, 16,  8,  2, 10, 18, 24, 32, 40, 48, 56),
+  c(32, 24, 16, 10,  2, 10, 18, 26, 34, 40, 48),
+  c(40, 32, 24, 16, 10,  2, 10, 18, 26, 34, 42),
+  c(48, 40, 32, 24, 18, 10,  2, 10, 18, 26, 34),
+  c(56, 48, 40, 32, 26, 18, 10,  2, 10, 18, 26),
+  c(64, 56, 48, 40, 32, 26, 18, 10,  6, 10, 18),
+  c(72, 64, 56, 48, 40, 34, 26, 18, 12, 10, 10)
+), nrow = nchar(seq2) + 1, ncol = nchar(seq1) + 1))
+D <- global_alignment_matrix(seq1, seq2)
+stopifnot(identical(D, expected_global), global_alignment_value(D) == 10)
+
+seq1 <- "GGTATGCTGGCGCTA"; seq2 <- "TATATGCGGCGTTT"
+D <- local_alignment_matrix(seq1, seq2)
+stopifnot(local_alignment_value(D) == 12)
+
+stopifnot(len_overlap("abc123", "123xyz") == 3,
+          len_overlap("abc1234", "1234xyz") == 4,
+          len_overlap("abc124", "123xyz") == 0)
+
+stopifnot(greedy_shortest_common_superstring(c("ABCD", "CDBC", "BCDA")) == "ABCDBCDA")
+# Many different strings of length 10 contain all eight 3-mers (de Bruijn
+# sequences), so which one comes out first depends on the order in which
+# permn() generates permutations. Test the properties that define an SCS
+# (shortest possible length, contains every input) instead of one exact string.
+reads <- c("BAA", "AAB", "BBA", "ABA", "ABB", "BBB", "AAA", "BAB")
+scs <- greedy_shortest_common_superstring(reads)
+stopifnot(nchar(scs) == 10,
+          all(vapply(reads, function(r) grepl(r, scs, fixed = TRUE), logical(1))))
+
+cat("All tests passed.\n")
 
